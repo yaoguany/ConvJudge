@@ -86,21 +86,20 @@ def build_judge_prompt_text(conv_a: str, conv_b: str) -> str:
         "You are a forensic conversation analyst. Two USER–ASSISTANT conversations are provided.\n"
         "Important: judge ONLY the USER messages; ignore all ASSISTANT messages and task outcomes.\n"
         "Exactly one conversation's USER messages are written by a real human, and the other's USER messages are written by an LLM.\n"
-        "Decide which conversation has the real USER based ONLY on USER-side linguistic and behavioral cues (informality, hesitations, self-corrections, inconsistencies, verbosity, typos, temporal references, etc.).\n\n"
+        "Judge STRICTLY by speaking style; do NOT consider semantic content, factual correctness, intent, or task success.\n"
+        "Do not use domain knowledge; rely purely on stylistic signals.\n\n"
         "Return strict JSON only, no commentary.\n"
         "{\n"
         "  \"which_is_real\": \"A\" | \"B\" | \"unknown\",\n"
         "  \"which_is_generated\": \"A\" | \"B\" | \"unknown\",\n"
         "  \"confidence\": <float 0..1>,\n"
         "  \"reason\": \"<brief overall rationale focused on USER style only>\",\n"
-        "  \"user_turn_evidence\": {\n"
-        "    \"A\": [ { \"turn_index\": <int>, \"reason\": \"<why this USER turn seems real or generated>\" } ],\n"
-        "    \"B\": [ { \"turn_index\": <int>, \"reason\": \"<why this USER turn seems real or generated>\" } ]\n"
-        "  }\n"
+        "  \"generated_user_turn_evidence\": [ { \"turn_index\": <int>, \"reason\": \"<concise USER-style cue>\" } ]\n"
         "}\n\n"
         "Notes:\n"
-        "- Only cite indices that correspond to USER turns in the transcripts.\n"
-        "- Keep reasons short and concrete (style cues, disfluencies, typos, etc.).\n\n"
+        "- Provide evidence only for the conversation you believe is GENERATED.\n"
+        "- Cite only USER-turn indices from that conversation; keep reasons short and STYLE-ONLY (disfluencies, fillers, contractions, punctuation, rhythm).\n"
+        "- Do NOT reference semantic content, facts, domain correctness, or task outcomes in your reasons.\n\n"
         "CONVERSATION A:\n" + conv_a + "\n\n"
         "CONVERSATION B:\n" + conv_b + "\n"
     )
@@ -110,9 +109,15 @@ def build_refine_prompt_text(issues_json: str, conv_text: str) -> str:
     return (
         "You are improving the realism of ONLY the USER messages in the provided conversation.\n"
         "Keep number of turns, indices, and ALL assistant messages unchanged.\n"
-        "Edit ONLY the USER turns listed in TARGET_USER_TURNS below, using the provided reason per index.\n"
-        "Do not add or remove turns. Do not change assistant content.\n\n"
-        "Return strict JSON only with replacements of user content by turn_index.\n"
+        "Edit ONLY the USER turns listed in TARGET_USER_TURNS below.\n"
+        "Important: The reasons describe artifacts that made these USER turns look LLM‑generated (fake).\n"
+        "Goal: intentionally reduce polish so the USER sounds more spontaneous and imperfect. Prefer slightly messy, human style over clean, formal writing.\n"
+        "Your job is to CORRECT/REDUCE the listed artifacts — do NOT amplify them — but produce output that feels less polished than the original.\n"
+        "Allowed edits (keep meaning intact): reorder clauses; split/merge sentences; vary length and rhythm; add light disfluencies and hedges; brief self-corrections; contractions/colloquialisms; remove template/list‑like phrasing; minor non‑critical typos on common words.\n"
+        "Required strength: each edited USER turn should include at least TWO such human cues. Avoid purely cosmetic changes.\n"
+        "Preserve the user’s original intent and keep all factual tokens EXACT (names, dates, times, flight numbers, addresses, phone numbers, emails, IDs). You may rearrange around them but must not alter them.\n"
+        "Do not add or remove turns. Do not change assistant content. Do not introduce new facts or new PII.\n\n"
+        "Return strict JSON only with replacements of user content by turn_index. Only include indices you actually changed.\n"
         "{\n"
         "  \"replacements\": [\n"
         "    { \"turn_index\": <int>, \"new_content\": \"<string>\" }\n"
@@ -129,8 +134,7 @@ class JudgeResult:
     which_is_generated: str  # "A" | "B" | "unknown"
     confidence: float
     reason: str
-    evidence_A: list[dict[str, Any]]
-    evidence_B: list[dict[str, Any]]
+    evidence_generated: list[dict[str, Any]]
 
 
 def call_judge(model: str, conv_a_text: str, conv_b_text: str) -> JudgeResult:
@@ -141,7 +145,7 @@ def call_judge(model: str, conv_a_text: str, conv_b_text: str) -> JudgeResult:
         d = extract_first_json(resp_text)
     except Exception:
         # Fallback structure if parsing fails
-        d = {"which_is_real": "unknown", "which_is_generated": "unknown", "confidence": 0.0, "reason": resp_text[:300], "user_turn_evidence": {"A": [], "B": []}}
+        d = {"which_is_real": "unknown", "which_is_generated": "unknown", "confidence": 0.0, "reason": resp_text[:300], "generated_user_turn_evidence": []}
     which_real = str(d.get("which_is_real", "unknown")).strip().upper()
     which_gen = str(d.get("which_is_generated", "unknown")).strip().upper()
     try:
@@ -149,7 +153,12 @@ def call_judge(model: str, conv_a_text: str, conv_b_text: str) -> JudgeResult:
     except Exception:
         conf = 0.0
     reason = str(d.get("reason", "")).strip()
-    ev = d.get("user_turn_evidence") or d.get("evidence") or {}
+    ev = d.get("generated_user_turn_evidence")
+    if ev is None:
+        # Back-compat: if the model returned per-side evidence, pick the generated side only.
+        ev_all = d.get("user_turn_evidence") or {}
+        sel_side = which_gen if which_gen in ("A", "B") else ""
+        ev = (ev_all or {}).get(sel_side, [])
     def _normalize_ev(x: Any) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         if isinstance(x, list):
@@ -161,13 +170,16 @@ def call_judge(model: str, conv_a_text: str, conv_b_text: str) -> JudgeResult:
                 except Exception:
                     continue
         return out
-    evA = _normalize_ev((ev or {}).get("A", []))
-    evB = _normalize_ev((ev or {}).get("B", []))
-    return JudgeResult(which_is_real=which_real, which_is_generated=which_gen, confidence=conf, reason=reason, evidence_A=evA, evidence_B=evB)
+    ev_gen = _normalize_ev(ev or [])
+    return JudgeResult(which_is_real=which_real, which_is_generated=which_gen, confidence=conf, reason=reason, evidence_generated=ev_gen)
 
 
 def call_refine(model: str, issues: list[dict[str, Any]], conv_text: str) -> list[dict[str, Any]]:
-    system = "You precisely edit only user message contents."
+    system = (
+        "You aggressively humanize only the specified USER turns. Prefer slightly messy, spontaneous speech over polished writing. "
+        "Reduce LLM-like artifacts and allow substantial paraphrase (reorder/split/merge), but preserve intent and keep factual tokens (numbers/emails/IDs) exact. "
+        "For each edited turn, include at least two human cues (fillers, hedges, self-correction, repetition, ellipses, varied punctuation)."
+    )
     # Serialize issues as compact JSON for the prompt
     try:
         issues_json = json.dumps(issues, ensure_ascii=False)
@@ -288,7 +300,8 @@ def refine_loop_for_file(
                 "which_is_generated": judge.which_is_generated,
                 "confidence": judge.confidence,
                 "reason": judge.reason,
-                "user_turn_evidence": {"A": judge.evidence_A, "B": judge.evidence_B},
+                "target_side": judge.which_is_generated,
+                "generated_user_turn_evidence": judge.evidence_generated,
                 "correct": bool(correct),
                 "distinguishable": bool(distinguishable),
             },
@@ -304,8 +317,8 @@ def refine_loop_for_file(
             break
 
         # Judge correctly distinguished; refine user messages of generated
-        # Choose the evidence corresponding to the generated conversation side
-        gen_issues = judge.evidence_A if order == "AR" else judge.evidence_B
+        # Use only the issues for the generated side
+        gen_issues = judge.evidence_generated
         # If no indexed issues were provided, there's nothing targeted to fix
         if not gen_issues:
             break
@@ -340,7 +353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model", default="gpt-5", help="Model/deployment name to use for judge/refine.")
     parser.add_argument(
         "--generated-dir",
-        default="dump/simulated_conv",
+        default="dump/simulated_conv_dental",
         help="Directory OR single JSON file of generated conversations.",
     )
     parser.add_argument(
@@ -350,8 +363,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--output-dir", default="dump/refined_conv", help="Directory to write refined conversations.")
     parser.add_argument("--logs-dir", default="dump/refine_logs", help="Directory to write per-iteration logs.")
-    parser.add_argument("--max-iters", type=int, default=3, help="Max refinement iterations per conversation.")
-    parser.add_argument("--confidence-threshold", type=float, default=0.6, help="Minimum judge confidence to keep refining.")
+    parser.add_argument("--max-iters", type=int, default=5, help="Max refinement iterations per conversation.")
+    parser.add_argument("--confidence-threshold", type=float, default=0.0, help="Minimum judge confidence to keep refining.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling/order.")
     parser.add_argument("--limit", type=int, default=0, help="Optional cap on number of generated files to process (0=all).")
     args = parser.parse_args(list(argv) if argv is not None else None)
