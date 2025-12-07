@@ -15,17 +15,19 @@ import csv
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence, List, Dict, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 from concurrent.futures import ThreadPoolExecutor, as_completed  # Option A fallback
 
 from azure_gpt_call import call_chat_completion
 from evaluate_simulated_conversations import (
+    PhaseKey,
     VKey,
-    compute_metrics,
     compute_turn_metrics,
     extract_first_json,
     format_guidelines,
+    infer_category_titles,
+    normalize_category,
 )
 
 
@@ -122,7 +124,8 @@ async def evaluate_conversation_pairwise(
     truth_list = convo.get("mistakes", [])
     conv_id = convo_path.stem
 
-    guidelines_text = format_guidelines(oracle)
+    cat_titles = infer_category_titles(oracle)
+    guidelines_text = format_guidelines(oracle, cat_titles)
 
     assistant_turns = sorted(
         int(msg.get("turn_index", -1)) for msg in message_list if str(msg.get("role", "")).lower() == "assistant"
@@ -148,7 +151,7 @@ async def evaluate_conversation_pairwise(
     pred_keys = {VKey.from_pred(it) for it in pred_items}
     truth_keys = {VKey.from_truth(it) for it in truth_list}
 
-    precision, recall, f1, tp, fp, fn = compute_metrics(pred_keys, truth_keys)
+    precision, recall, f1, tp, fp, fn = compute_phase_metrics(pred_keys, truth_keys)
     turn_precision, turn_recall, turn_f1, turn_tp, turn_fp, turn_fn = compute_turn_metrics(pred_keys, truth_keys)
 
     payload = {
@@ -180,6 +183,32 @@ async def evaluate_conversation_pairwise(
 
 
 # ---------- Helpers for Option A fallback ----------
+
+def compute_phase_metrics(pred: Set[VKey], truth: Set[VKey]):
+    pred_group = _group_by_phase(pred)
+    truth_group = _group_by_phase(truth)
+    pred_phase = set(pred_group.keys())
+    truth_phase = set(truth_group.keys())
+    tp_phase = pred_phase & truth_phase
+    fp_phase = pred_phase - truth_phase
+    fn_phase = truth_phase - pred_phase
+    tp = len(tp_phase); fp = len(fp_phase); fn = len(fn_phase)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    tp_items = sorted((truth_group[pk][0] for pk in tp_phase), key=lambda x: x.turn_index)
+    fp_items = sorted((pred_group[pk][0] for pk in fp_phase), key=lambda x: x.turn_index)
+    fn_items = sorted((truth_group[pk][0] for pk in fn_phase), key=lambda x: x.turn_index)
+    return precision, recall, f1, tp_items, fp_items, fn_items
+
+
+def _group_by_phase(keys: Set[VKey]) -> Dict[PhaseKey, List[VKey]]:
+    grouped: Dict[PhaseKey, List[VKey]] = {}
+    for item in keys:
+        pk = PhaseKey.from_vkey(item)
+        grouped.setdefault(pk, []).append(item)
+    return grouped
+
 
 def _print_result_line(res: Dict[str, Any], fname: str) -> None:
     print(

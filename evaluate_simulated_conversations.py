@@ -6,7 +6,7 @@ import json
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Dict, Sequence
 
 from azure_gpt_call import call_chat_completion
 
@@ -52,6 +52,17 @@ class VKey:
         return cls(turn_index, cat, key, phase)
 
 
+@dataclass(frozen=True)
+class PhaseKey:
+    category: str
+    key: str
+    phase: int
+
+    @classmethod
+    def from_vkey(cls, vkey: VKey) -> "PhaseKey":
+        return cls(vkey.category, vkey.key, vkey.phase)
+
+
 def normalize_category(cat: str) -> str:
     c = (cat or "").strip().lower()
     if not c:
@@ -71,16 +82,33 @@ def normalize_category(cat: str) -> str:
     return cat
 
 
-def format_guidelines(oracle: dict[str, Any]) -> str:
-    cat1 = oracle.get("Category 1: Universal Compliance", {}) or {}
-    cat2 = oracle.get("Category 2: Intent Triggered Guidelines", {}) or {}
-    cat3 = oracle.get("Category 3: Condition Triggered Guidelines", {}) or {}
+def infer_category_titles(oracle: dict[str, Any]) -> Dict[str, str]:
+    titles = {
+        "cat1": "Category 1: Universal Compliance",
+        "cat2": "Category 2: Intent Triggered Guidelines",
+        "cat3": "Category 3: Condition Triggered Guidelines",
+    }
+    for key in oracle.keys():
+        low = key.lower()
+        if low.startswith("category 1"):
+            titles["cat1"] = key
+        elif low.startswith("category 2"):
+            titles["cat2"] = key
+        elif low.startswith("category 3"):
+            titles["cat3"] = key
+    return titles
+
+
+def format_guidelines(oracle: dict[str, Any], titles: Dict[str, str]) -> str:
+    cat1 = oracle.get(titles["cat1"], {}) or {}
+    cat2 = oracle.get(titles["cat2"], {}) or {}
+    cat3 = oracle.get(titles["cat3"], {}) or {}
     lines: list[str] = []
-    lines.append("CATEGORY 1: Universal Compliance (Keys must match exactly)")
+    lines.append(f"{titles['cat1'].upper()} (Keys must match exactly)")
     for k, v in cat1.items():
         lines.append(f"- Key: {k}\n  Text: {v}")
     lines.append("")
-    lines.append("CATEGORY 2: Intent Triggered Guidelines (Keys are intents; include Phase number)")
+    lines.append(f"{titles['cat2'].upper()} (Keys are intents; include Phase number)")
     if isinstance(cat2, dict):
         for intent, phases in cat2.items():
             lines.append(f"- Intent Key: {intent}")
@@ -88,7 +116,7 @@ def format_guidelines(oracle: dict[str, Any]) -> str:
                 for i, p in enumerate(phases, 1):
                     lines.append(f"  Phase {i}: {p}")
     lines.append("")
-    lines.append("CATEGORY 3: Condition Triggered Guidelines (Keys must match exactly)")
+    lines.append(f"{titles['cat3'].upper()} (Keys must match exactly)")
     for k, v in cat3.items():
         lines.append(f"- Key: {k}\n  Text: {v}")
     return "\n".join(lines)
@@ -148,14 +176,23 @@ def extract_first_json(text: str) -> dict[str, Any]:
 
 
 def compute_metrics(pred: set[VKey], truth: set[VKey]):
-    tp_set = pred & truth
-    fp_set = pred - truth
-    fn_set = truth - pred
-    tp = len(tp_set); fp = len(fp_set); fn = len(fn_set)
+    pred_group = _group_by_phase(pred)
+    truth_group = _group_by_phase(truth)
+    pred_phase = set(pred_group.keys())
+    truth_phase = set(truth_group.keys())
+
+    tp_phase = pred_phase & truth_phase
+    fp_phase = pred_phase - truth_phase
+    fn_phase = truth_phase - pred_phase
+
+    tp = len(tp_phase); fp = len(fp_phase); fn = len(fn_phase)
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return precision, recall, f1, sorted(tp_set, key=lambda x: x.turn_index), sorted(fp_set, key=lambda x: x.turn_index), sorted(fn_set, key=lambda x: x.turn_index)
+    tp_items = sorted((truth_group[pk][0] for pk in tp_phase), key=lambda x: x.turn_index)
+    fp_items = sorted((pred_group[pk][0] for pk in fp_phase), key=lambda x: x.turn_index)
+    fn_items = sorted((truth_group[pk][0] for pk in fn_phase), key=lambda x: x.turn_index)
+    return precision, recall, f1, tp_items, fp_items, fn_items
 
 
 def compute_turn_metrics(pred: set[VKey], truth: set[VKey]):
@@ -171,6 +208,14 @@ def compute_turn_metrics(pred: set[VKey], truth: set[VKey]):
     return precision, recall, f1, sorted(tp_set), sorted(fp_set), sorted(fn_set)
 
 
+def _group_by_phase(keys: set[VKey]) -> dict[PhaseKey, list[VKey]]:
+    grouped: dict[PhaseKey, list[VKey]] = {}
+    for item in keys:
+        phase_key = PhaseKey.from_vkey(item)
+        grouped.setdefault(phase_key, []).append(item)
+    return grouped
+
+
 def evaluate_one(model: str, oracle: dict[str, Any], convo_path: Path, out_dir: Path) -> dict[str, Any]:
     with convo_path.open("r", encoding="utf-8") as f:
         convo = json.load(f)
@@ -179,7 +224,8 @@ def evaluate_one(model: str, oracle: dict[str, Any], convo_path: Path, out_dir: 
     truth_list = convo.get("mistakes", [])
     conv_id = convo_path.stem
 
-    guidelines_text = format_guidelines(oracle)
+    cat_titles = infer_category_titles(oracle)
+    guidelines_text = format_guidelines(oracle, cat_titles)
     conversation_text = format_conversation(message_list)
     user_prompt = build_user_prompt(guidelines_text, conversation_text, conv_id)
 
@@ -343,9 +389,9 @@ def _write_summaries(output_dir: Path, results: list[dict[str, Any]]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate simulated conversations with an LLM.")
     parser.add_argument("--model", default="gpt-5", help="Model/deployment name for evaluation.")
-    parser.add_argument("--guidelines", default="guidelines/dental/oracle.json", help="Path to oracle guidelines.")
-    parser.add_argument("--data-dir", default="dump/simulated_dental_500_v1", help="Directory of simulated conversations.")
-    parser.add_argument("--output-dir", default="dump/eval_dental_500_v1", help="Base directory to write evaluation outputs (per-model subfolder will be used).")
+    parser.add_argument("--guidelines", default="guidelines/SCAN/oracle.json", help="Path to oracle guidelines.")
+    parser.add_argument("--data-dir", default="dump/simulated_scan_test", help="Directory of simulated conversations.")
+    parser.add_argument("--output-dir", default="dump/eval_scan_test", help="Base directory to write evaluation outputs (per-model subfolder will be used).")
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N remaining conversations.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 

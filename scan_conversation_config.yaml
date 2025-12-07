@@ -1,7 +1,7 @@
 # Default configuration for SCAN callback conversation refinement.
 # Adjust paths/models as needed before running simulate_scan_conversation_refine.py.
 
-personas: user_persona/scan-test              # folder or single persona file
+personas: user_persona/scan              # folder or single persona file
 max_turns: 10                            # maximum turns (agent starts)
 violation_portion: 0.4                   # portion of guidelines to corrupt per conversation
 seed: 42                                 # RNG seed
