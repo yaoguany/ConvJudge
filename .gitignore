@@ -5,7 +5,6 @@ scripts/env_setup.sh
 __pycache__/
 .env
 .ipynb_checkpoints/
-azure_gpt_call.py
 test_login.py
 test_nodebook.ipynb
 data_v0/data_dental/real_ref_dental_elizabeth.json
