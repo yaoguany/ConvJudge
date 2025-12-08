@@ -11,8 +11,8 @@ from typing import Any, Dict, Sequence
 from azure_gpt_call import call_chat_completion
 
 SYSTEM_PROMPT = (
-    "You are the SCAN Health compliance evaluator. "
-    "Given the official SCAN callback guidelines and a conversation transcript, identify exactly which assistant turns violate which guideline. "
+    "You are an LLM Judge for evaluating whether a call center agent follows his guidelines. "
+    "Given the official guidelines that the agent should follow and a conversation transcript, identify exactly which assistant turns violate which guideline. "
     "Only assistant (agent) turns can violate guidelines; never mark caller turns. "
     "Each assistant turn may map to at most one violation entry. "
     "Use the exact Category titles and Keys from the guidelines when possible. "
