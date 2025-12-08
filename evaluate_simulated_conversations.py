@@ -11,7 +11,7 @@ from typing import Any, Dict, Sequence
 from azure_gpt_call import call_chat_completion
 
 SYSTEM_PROMPT = (
-    "You are a precise compliance evaluator for Celestar Air. "
+    "You are a precise compliance evaluator. "
     "Given the official guidelines and a conversation transcript, identify exactly which assistant turns violate which guideline. "
     "Only assistant (agent) turns can violate guidelines; never mark user turns. "
     "Use the exact Category titles and Keys from the guidelines when possible. "

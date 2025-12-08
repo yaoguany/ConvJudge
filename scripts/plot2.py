@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--evaluation-root",
         type=Path,
-        default=Path("dump/eval_dental_500_v1"),
+        default=Path("dump/eval_results"),
         help="Root directory containing per-model evaluation folders.",
     )
     parser.add_argument(
