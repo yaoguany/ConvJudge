@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed  # Option A fall
 
 from azure_gpt_call import call_chat_completion
 from evaluate_simulated_conversations import (
-    PhaseKey,
     VKey,
     compute_turn_metrics,
     extract_first_json,
@@ -32,9 +31,10 @@ from evaluate_simulated_conversations import (
 
 
 PAIRWISE_SYSTEM_PROMPT = (
-    "You are a precise compliance evaluator for Celestar Air. "
-    "Given the official guidelines and the conversation history, evaluate ONLY the final assistant message shown. "
-    "Decide which guidelines that last assistant turn violates. "
+    "You are the SCAN Health compliance evaluator. "
+    "Given the official SCAN callback guidelines and the conversation history, evaluate ONLY the final assistant message shown. "
+    "Decide which guidelines that last assistant turn violates, if any. "
+    "If the turn is compliant, return an empty violations list. "
     "Return strict JSON only, with accurate turn_index, category, key, and guideline_phase."
 )
 
@@ -59,9 +59,9 @@ def build_pair_prompt(guidelines_text: str, history_text: str, conv_id: str, tar
         "- Use exact field names and values as they appear in the guidelines.\n"
         "- For Category 1 or 3, set guideline_phase to -1.\n"
         "- For Category 2, set guidance_key to the intent name and guideline_phase to the Phase number.\n"
+        "- If the assistant turn violates no guideline, return an empty violations list.\n"
         "RESPONSE (strict JSON only):\n"
         "{\n"
-        f"  \"conversation_id\": \"{conv_id}\",\n"
         f"  \"target_turn_index\": {target_turn_index},\n"
         "  \"violations\": [\n"
         "    {\n"
@@ -185,29 +185,17 @@ async def evaluate_conversation_pairwise(
 # ---------- Helpers for Option A fallback ----------
 
 def compute_phase_metrics(pred: Set[VKey], truth: Set[VKey]):
-    pred_group = _group_by_phase(pred)
-    truth_group = _group_by_phase(truth)
-    pred_phase = set(pred_group.keys())
-    truth_phase = set(truth_group.keys())
-    tp_phase = pred_phase & truth_phase
-    fp_phase = pred_phase - truth_phase
-    fn_phase = truth_phase - pred_phase
-    tp = len(tp_phase); fp = len(fp_phase); fn = len(fn_phase)
+    tp_items = sorted(pred & truth, key=lambda x: x.turn_index)
+    fp_items = sorted(pred - truth, key=lambda x: x.turn_index)
+    fn_items = sorted(truth - pred, key=lambda x: x.turn_index)
+
+    tp = len(tp_items)
+    fp = len(fp_items)
+    fn = len(fn_items)
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    tp_items = sorted((truth_group[pk][0] for pk in tp_phase), key=lambda x: x.turn_index)
-    fp_items = sorted((pred_group[pk][0] for pk in fp_phase), key=lambda x: x.turn_index)
-    fn_items = sorted((truth_group[pk][0] for pk in fn_phase), key=lambda x: x.turn_index)
     return precision, recall, f1, tp_items, fp_items, fn_items
-
-
-def _group_by_phase(keys: Set[VKey]) -> Dict[PhaseKey, List[VKey]]:
-    grouped: Dict[PhaseKey, List[VKey]] = {}
-    for item in keys:
-        pk = PhaseKey.from_vkey(item)
-        grouped.setdefault(pk, []).append(item)
-    return grouped
 
 
 def _print_result_line(res: Dict[str, Any], fname: str) -> None:
@@ -333,9 +321,9 @@ def _eval_one_in_thread(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pairwise evaluation of simulated conversations.")
     parser.add_argument("--model", default="gpt-5", help="Model/deployment name for evaluation.")
-    parser.add_argument("--guidelines", default="guidelines/dental/oracle.json", help="Path to oracle guidelines.")
-    parser.add_argument("--data-dir", default="dump/simulated_dental_500_v1", help="Directory of simulated conversations.")
-    parser.add_argument("--output-dir", default="dump/eval_dental_500_v1_pair", help="Directory to write evaluation outputs.")
+    parser.add_argument("--guidelines", default="guidelines/SCAN/modified.json", help="Path to oracle guidelines.")
+    parser.add_argument("--data-dir", default="dump/simulated_scan_test", help="Directory of simulated conversations.")
+    parser.add_argument("--output-dir", default="dump/eval_scan_test_pairwise", help="Directory to write evaluation outputs.")
     parser.add_argument("--concurrency", type=int, default=2, help="Max concurrent LLM calls across turns.")
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N conversations.")
     args = parser.parse_args(list(argv) if argv is not None else None)

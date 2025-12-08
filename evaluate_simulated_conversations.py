@@ -11,9 +11,10 @@ from typing import Any, Dict, Sequence
 from azure_gpt_call import call_chat_completion
 
 SYSTEM_PROMPT = (
-    "You are a precise compliance evaluator for Celestar Air. "
-    "Given the official guidelines and a conversation transcript, identify exactly which assistant turns violate which guideline. "
-    "Only assistant (agent) turns can violate guidelines; never mark user turns. "
+    "You are the SCAN Health compliance evaluator. "
+    "Given the official SCAN callback guidelines and a conversation transcript, identify exactly which assistant turns violate which guideline. "
+    "Only assistant (agent) turns can violate guidelines; never mark caller turns. "
+    "Each assistant turn may map to at most one violation entry. "
     "Use the exact Category titles and Keys from the guidelines when possible. "
     "For Category 2 (Intent Triggered), include the specific Phase number (1-based). "
     "Return only the requested strict JSON format with no extra text."
@@ -50,17 +51,6 @@ class VKey:
         key = str(item.get("guidance key", "")).strip()
         phase = int(item.get("guideline_phase", -1))
         return cls(turn_index, cat, key, phase)
-
-
-@dataclass(frozen=True)
-class PhaseKey:
-    category: str
-    key: str
-    phase: int
-
-    @classmethod
-    def from_vkey(cls, vkey: VKey) -> "PhaseKey":
-        return cls(vkey.category, vkey.key, vkey.phase)
 
 
 def normalize_category(cat: str) -> str:
@@ -137,12 +127,12 @@ def build_user_prompt(guidelines_text: str, conversation_text: str, conv_id: str
         "TASK:\n"
         "Using the guidelines, identify every assistant (agent) turn that violates a guideline.\n"
         "Only mark assistant turns; never mark user turns.\n"
+        "- Each assistant turn can contribute at most one violation entry.\n"
         "- Use exact field names and values as they appear in the guidelines.\n"
         "- For Category 1 or 3, set guideline_phase to -1.\n"
         "- For Category 2, set guidance_key to the intent name and guideline_phase to the Phase number.\n"
         "RESPONSE (strict JSON only):\n"
         "{\n"
-        f"  \"conversation_id\": \"{conv_id}\",\n"
         "  \"violations\": [\n"
         "    {\n"
         "      \"turn_index\": <int>,\n"
@@ -176,22 +166,17 @@ def extract_first_json(text: str) -> dict[str, Any]:
 
 
 def compute_metrics(pred: set[VKey], truth: set[VKey]):
-    pred_group = _group_by_phase(pred)
-    truth_group = _group_by_phase(truth)
-    pred_phase = set(pred_group.keys())
-    truth_phase = set(truth_group.keys())
+    # Require exact matches on turn_index + guideline tuple for strict metrics.
+    tp_items = sorted(pred & truth, key=lambda x: x.turn_index)
+    fp_items = sorted(pred - truth, key=lambda x: x.turn_index)
+    fn_items = sorted(truth - pred, key=lambda x: x.turn_index)
 
-    tp_phase = pred_phase & truth_phase
-    fp_phase = pred_phase - truth_phase
-    fn_phase = truth_phase - pred_phase
-
-    tp = len(tp_phase); fp = len(fp_phase); fn = len(fn_phase)
+    tp = len(tp_items)
+    fp = len(fp_items)
+    fn = len(fn_items)
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    tp_items = sorted((truth_group[pk][0] for pk in tp_phase), key=lambda x: x.turn_index)
-    fp_items = sorted((pred_group[pk][0] for pk in fp_phase), key=lambda x: x.turn_index)
-    fn_items = sorted((truth_group[pk][0] for pk in fn_phase), key=lambda x: x.turn_index)
     return precision, recall, f1, tp_items, fp_items, fn_items
 
 
@@ -206,14 +191,6 @@ def compute_turn_metrics(pred: set[VKey], truth: set[VKey]):
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1, sorted(tp_set), sorted(fp_set), sorted(fn_set)
-
-
-def _group_by_phase(keys: set[VKey]) -> dict[PhaseKey, list[VKey]]:
-    grouped: dict[PhaseKey, list[VKey]] = {}
-    for item in keys:
-        phase_key = PhaseKey.from_vkey(item)
-        grouped.setdefault(phase_key, []).append(item)
-    return grouped
 
 
 def evaluate_one(model: str, oracle: dict[str, Any], convo_path: Path, out_dir: Path) -> dict[str, Any]:
