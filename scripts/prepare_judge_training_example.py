@@ -10,6 +10,7 @@ and must reply with the strict JSON listing all violations.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 import types
@@ -20,23 +21,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-if "azure_gpt_call" not in sys.modules:
-    stub = types.ModuleType("azure_gpt_call")
+MODULE_NAME = "providers.azure_gpt_call"
+if MODULE_NAME not in sys.modules:
+    stub = types.ModuleType(MODULE_NAME)
 
     def _unused_call_chat_completion(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore[name-defined]
         raise RuntimeError("call_chat_completion is not available in training-data prep.")
 
     stub.call_chat_completion = _unused_call_chat_completion  # type: ignore[attr-defined]
-    sys.modules["azure_gpt_call"] = stub
+    sys.modules[MODULE_NAME] = stub
+    providers_pkg = importlib.import_module("providers")
+    setattr(providers_pkg, "azure_gpt_call", stub)
 
-from evaluate_simulated_conversations import (
-    SYSTEM_PROMPT,
-    build_user_prompt,
-    format_conversation,
-    format_guidelines,
-    infer_category_titles,
-    normalize_category,
-)
+from evaluation.shared import build_user_prompt, format_conversation, format_guidelines, infer_category_titles, normalize_category
 
 
 def _load_json(path: Path) -> dict[str, Any]:

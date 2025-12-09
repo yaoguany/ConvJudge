@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate reversed (violating) guideline variants using gpt-5 via azure_gpt_call.
+"""Generate reversed (violating) guideline variants using gpt-5 via providers.azure_gpt_call.
 
 This script:
 - Reads original guidelines from `guidelines/airlines/oracle.json`.
@@ -14,7 +14,7 @@ Category handling:
   replaced by a list[str] (handled step-by-step per phase).
 
 Environment:
-- Uses `azure_gpt_call.call_chat_completion` with model `gpt-5`.
+- Uses `providers.azure_gpt_call.call_chat_completion` with model `gpt-5`.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import re
 import sys
 from typing import Any, Iterable
 
-from azure_gpt_call import call_chat_completion
+from providers.azure_gpt_call import call_chat_completion
 
 
 class Progress:

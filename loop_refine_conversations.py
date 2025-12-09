@@ -2,7 +2,7 @@
 """Pairwise judge real vs. generated conversations and iteratively refine.
 
 This script compares each generated conversation against a sampled real
-conversation using an LLM judge (via azure_gpt_call.py). If the judge
+conversation using an LLM judge (via providers.azure_gpt_call). If the judge
 correctly identifies which is real vs. generated, it returns a reason.
 We then refine the generated conversation by modifying ONLY the user
 messages' content to be more realistic based on the judge's reason.
@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from azure_gpt_call import call_chat_completion
+from providers.azure_gpt_call import call_chat_completion
 
 
 # ------------------------------

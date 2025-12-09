@@ -1,3 +1,4 @@
+import argparse
 import random
 import string
 from dataclasses import dataclass, field, asdict
@@ -259,17 +260,40 @@ def _persona_filename(first_name: str, last_name: str, pid: int) -> str:
     return f"{first_name}_{last_name}_{pid}.json"
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate Celestar Air caller personas.")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=500,
+        help="Number of personas to generate (default: 500)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=os.path.join("user_persona", "airline_500"),
+        help="Directory to store persona JSON files.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Optional random seed for reproducibility.",
+    )
+    return parser.parse_args()
+
+
 # Batch generation main
 if __name__ == "__main__":
-    out_dir = "user_persona"
-    count = 100
-    _ensure_dir(out_dir)
+    args = parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
+    _ensure_dir(args.output_dir)
 
-    for pid in range(1, count + 1):
+    for pid in range(1, args.count + 1):
         persona = generate_airline_persona()
         data = asdict(persona)
         data["id"] = pid
-        fname = _persona_filename(data.get("first_name", "User"), data.get("last_name", "Unknown"), "P"+str(pid))
-        fpath = os.path.join(out_dir, fname)
+        fname = _persona_filename(data.get("first_name", "User"), data.get("last_name", "Unknown"), "P" + str(pid))
+        fpath = os.path.join(args.output_dir, fname)
         with open(fpath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

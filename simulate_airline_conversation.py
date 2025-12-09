@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Tuple
 import math
 
-from azure_gpt_call import call_chat_completion
+from providers.azure_gpt_call import call_chat_completion
 import concurrent.futures as _futures
 import traceback
 

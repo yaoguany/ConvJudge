@@ -8,11 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from evaluate_simulated_conversations import (
-    VKey,
-    compute_metrics,
-    compute_turn_metrics,
-)
+from evaluation.shared import VKey, compute_metrics, compute_turn_metrics
 
 
 def _load_keys(data: dict[str, Any]) -> tuple[set[VKey], set[VKey]]:
