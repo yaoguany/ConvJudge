@@ -1,7 +1,7 @@
 # Default configuration for refined dental conversation simulation
 # Adjust values as needed; all flags from original CLI are represented.
 
-personas: user_persona/dental            # folder or single persona file
+personas: user_persona/dental/Aiden_Lewis_P95.json            # folder or single persona file
 max_turns: 12                            # maximum turns (agent-user pairs; agent starts)
 violation_portion: 0.4                  # guideline violation sampling portion
 seed: 42                                 # RNG seed

@@ -5,8 +5,8 @@ Loads parameters from `dental_conversation_config.yaml` so you don't need long C
 Original logic preserved in `simulate_dental_conversation_original.py`.
 """
 from __future__ import annotations
-import os, json, yaml, random, sys, re, asyncio
-from typing import Any, List, Tuple
+import os, json, yaml, random, sys, math, re, traceback, asyncio
+from typing import Any, List, Iterable, Tuple
 
 # Reuse original implementations
 import simulate_dental_conversation as base
@@ -14,120 +14,10 @@ import simulate_dental_conversation as base
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "dental_conversation_config.yaml")
 ANALYSIS_MARK = base.ANALYSIS_MARK
 
-from tqdm import tqdm
-
-
-# ---------------------------------------------------------------------------
-# Guideline replacement helpers (inject wrong guidelines directly)
-# ---------------------------------------------------------------------------
-
-def apply_violation_replacements(
-    oracle: dict[str, Any],
-    violation_directives: List[dict[str, Any]],
-) -> tuple[dict[str, Any], set[tuple[str, str, int]], List[dict[str, Any]]]:
-    """Return (applied_guidelines, wrong_guideline_ids, wrong_guidelines_meta).
-
-    - applied_guidelines: oracle where sampled directives are replaced by their modified text.
-    - wrong_guideline_ids: set of (category, key, phase) tuples indicating which entries were replaced.
-    - wrong_guidelines_meta: list of replaced guideline details with original/modified text for reference.
-    """
-    applied = json.loads(json.dumps(oracle))  # safe deep copy without mutating oracle
-    wrong_ids: set[tuple[str, str, int]] = set()
-    wrong_meta: List[dict[str, Any]] = []
-
-    for vd in violation_directives:
-        cat = base.normalize_category(str(vd.get("category", "")).strip())
-        key = str(vd.get("key", "")).strip()
-        modified = vd.get("modified", None)
-        label = str(vd.get("label", ""))
-        if not (cat and key) or modified is None:
-            continue
-
-        if cat in ("Category 1: Universal Compliance", "Category 3: Human Agent Handoff"):
-            section = applied.get(cat, {})
-            if isinstance(section, dict) and key in section:
-                original = section[key]
-                section[key] = modified
-                wrong_ids.add((cat, key, -1))
-                wrong_meta.append({
-                    "category": cat,
-                    "key": key,
-                    "phase": -1,
-                    "label": label,
-                    "original": original,
-                    "modified": modified,
-                })
-        elif cat == "Category 2: Step-by-Step Workflow":
-            section = applied.get(cat, {})
-            if not isinstance(section, dict) or key not in section:
-                continue
-            phases = section.get(key)
-            if not isinstance(phases, list):
-                continue
-            phase_num = int(vd.get("phase", -1))
-            if 1 <= phase_num <= len(phases):
-                original = phases[phase_num - 1]
-                phases[phase_num - 1] = modified
-                wrong_ids.add((cat, key, phase_num))
-                wrong_meta.append({
-                    "category": cat,
-                    "key": key,
-                    "phase": phase_num,
-                    "label": label,
-                    "original": original,
-                    "modified": modified,
-                })
-
-    return applied, wrong_ids, wrong_meta
-
-
-def _format_guidelines_for_prompt(applied: dict[str, Any]) -> str:
-    """Pretty-print applied guidelines with replacements for the agent prompt."""
-    lines: list[str] = []
-
-    cat1 = applied.get("Category 1: Universal Compliance", {}) or {}
-    if isinstance(cat1, dict) and cat1:
-        lines.append("Category 1: Universal Compliance")
-        for k, v in cat1.items():
-            lines.append(f"- {k}: {v}")
-
-    cat2 = applied.get("Category 2: Step-by-Step Workflow", {}) or {}
-    if isinstance(cat2, dict) and cat2:
-        lines.append("\nCategory 2: Step-by-Step Workflow")
-        for topic, phases in cat2.items():
-            if not isinstance(phases, list):
-                continue
-            lines.append(f"- Topic: {topic}")
-            for idx, text in enumerate(phases, start=1):
-                lines.append(f"  - Phase {idx}: {text}")
-
-    cat3 = applied.get("Category 3: Human Agent Handoff", {}) or {}
-    if isinstance(cat3, dict) and cat3:
-        lines.append("\nCategory 3: Human Agent Handoff")
-        for k, v in cat3.items():
-            lines.append(f"- {k}: {v}")
-
-    return "\n".join(lines)
-
-
-def build_agent_prompt_with_replacements(applied_guidelines: dict[str, Any]) -> str:
-    """System prompt where incorrect guidelines are already baked in (replacing oracle)."""
-    guideline_block = _format_guidelines_for_prompt(applied_guidelines)
-    lines = [
-        "You are a virtual smile assistant for ClearChoice Dental Implant Centers.",
-        "Follow ONLY the guidelines below (they already include the latest updates).",
-        "For every turn:",
-        "1) Output only the caller-facing reply text.",
-        f"2) Append a new line with '{ANALYSIS_MARK}' and an analysis block with:",
-        "- Guideline: <short label or summary you applied>",
-        "- Category: <exact category title>",
-        "- Key: <exact key/topic>",
-        "- Phase: <phase number for Category 2, else -1>",
-        "- Terminate: true|false (if the call should end now)",
-        "Do NOT mention analysis or guidelines in the caller-facing reply. No code fences.",
-        "\nGUIDELINES (updates applied):\n" + guideline_block,
-    ]
-    return "\n".join(lines)
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:
+    tqdm = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +58,8 @@ def simulate_one_refine(
         portion=violation_portion,
         rng=rng,
     )
-    applied_guidelines, wrong_guideline_ids, wrong_guidelines_meta = apply_violation_replacements(oracle, violation_directives)
     user_sys = base.persona_to_user_system_prompt(persona)
-    agent_sys = build_agent_prompt_with_replacements(applied_guidelines)
+    agent_sys = base.build_agent_system_prompt(oracle, violation_directives)
 
     public_messages: List[dict] = []
     mistakes: list[dict[str, Any]] = []
@@ -215,13 +104,16 @@ def simulate_one_refine(
                 if body.startswith("json"):
                     body = body[len("json"):]
                 txt = body.strip()
-        data = json.loads(txt)
-        li = int(data.get("least_index", -1))
-        reason = str(data.get("reason", "")).strip()
-        if li == candidate_index:
-            return True, reason or "Less natural wording"
-        else:
-            return False, reason
+        try:
+            data = json.loads(txt)
+            li = int(data.get("least_index", -1))
+            reason = str(data.get("reason", "")).strip()
+            if li == candidate_index:
+                return True, reason or "Less natural wording"
+            else:
+                return False, reason
+        except Exception:
+            return False, "Parsing failure; stop refinement"
 
     def _rewrite(candidate: str, reason: str) -> str:
         if not use_refine:
@@ -246,10 +138,13 @@ def simulate_one_refine(
                 if body.startswith("json"):
                     body = body[len("json"):]
                 txt = body.strip()
-        data = json.loads(txt)
-        rw = data.get("rewrite", "")
-        if isinstance(rw, str) and rw.strip():
-            return rw.strip()
+        try:
+            data = json.loads(txt)
+            rw = data.get("rewrite", "")
+            if isinstance(rw, str) and rw.strip():
+                return rw.strip()
+        except Exception:
+            pass
         return candidate
 
     terminate = False
@@ -258,23 +153,28 @@ def simulate_one_refine(
         agent_reply_raw, analysis = call_agent_model(agent_sys, public_messages)
         public_messages.append({"role": "assistant", "content": agent_reply_raw})
 
-        # Record mistakes when the cited guideline is one of the replaced (wrong) ones
-        if isinstance(analysis, dict):
+        # Record mistakes per original logic
+        if isinstance(analysis, dict) and analysis.get("correctness", "").lower() == "mistake":
             cat = base.normalize_category(str(analysis.get("category", "")).strip())
             key = str(analysis.get("key", "")).strip()
-            phase_raw = analysis.get("phase", None)
-            phase_num: int = -1
-            if cat == "Category 2: Step-by-Step Workflow":
-                phase_num = int(phase_raw)
-            if cat in ("Category 1: Universal Compliance", "Category 3: Human Agent Handoff"):
-                phase_num = -1
-            gid = (cat, key, phase_num)
-            if cat and key and gid in wrong_guideline_ids:
+            phase_num = analysis.get("phase", None)
+            valid = False
+            if cat and key:
+                if cat in ("Category 1: Universal Compliance", "Category 3: Human Agent Handoff"):
+                    section = oracle.get(cat, {}) or {}
+                    valid = isinstance(section, dict) and key in section
+                elif cat == "Category 2: Step-by-Step Workflow":
+                    section = oracle.get(cat, {}) or {}
+                    if isinstance(section, dict) and key in section:
+                        phases = section.get(key, []) if isinstance(section.get(key, None), list) else []
+                        if isinstance(phase_num, int) and 1 <= phase_num <= len(phases):
+                            valid = True
+            if valid:
                 mistakes.append({
                     "turn_index": len(public_messages) - 1,
                     "guidance category": cat,
                     "guidance key": key,
-                    "guideline_phase": phase_num,
+                    "guideline_phase": (phase_num if cat == "Category 2: Step-by-Step Workflow" else -1),
                     "evidence": agent_reply_raw,
                 })
 
@@ -318,7 +218,6 @@ def simulate_one_refine(
         "message_list": message_list,
         "mistakes": mistakes,
         "style_ref_messages_count": len(ref_user_messages),
-        "wrong_guidelines": wrong_guidelines_meta,
     }
 
 
@@ -375,22 +274,33 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
     # Preflight authentication (avoid flooding with repeated 401s)
     if fail_fast_auth:
-        _ = call_judge_chat(agent_model, [
-            {"role": "system", "content": "Ping"},
-            {"role": "user", "content": "auth preflight"},
-        ])
+        try:
+            _ = call_judge_chat(agent_model, [
+                {"role": "system", "content": "Ping"},
+                {"role": "user", "content": "auth preflight"},
+            ])
+        except Exception as exc:  # AuthenticationError surfaces as generic here
+            msg = str(exc)
+            if "Incorrect API key" in msg or "Authentication error" in msg or "invalid_api_key" in msg:
+                print("[FATAL] Authentication failed in preflight. Aborting run.", file=sys.stderr)
+                print(msg, file=sys.stderr)
+                return
+            # Non-auth errors we allow to proceed; they may be transient.
 
     # Pre-load reference conversation (for style judge). We'll only extract USER messages and
     # later sample/shuffle a subset per simulation. If reference missing, disable inline judge gracefully.
     ref_user_messages: list[dict[str, Any]] = []
     if inline_style_judge and real_ref and os.path.exists(real_ref):
-        ref_obj = base.read_json(real_ref)
-        raw_list = ref_obj.get("message_list") or ref_obj.get("conversation") or []
-        if isinstance(raw_list, list):
-            for m in raw_list:
-                role = str(m.get("role", "")).lower()
-                if role in ("user", "caller"):
-                    ref_user_messages.append({"content": m.get("content", "")})
+        try:
+            ref_obj = base.read_json(real_ref)
+            raw_list = ref_obj.get("message_list") or ref_obj.get("conversation") or []
+            if isinstance(raw_list, list):
+                for m in raw_list:
+                    role = str(m.get("role", "")).lower()
+                    if role in ("user", "caller"):
+                        ref_user_messages.append({"content": m.get("content", "")})
+        except Exception:
+            ref_user_messages = []
     if inline_style_judge and not ref_user_messages:
         # No usable reference user messages; disable style judge to avoid assertions downstream.
         inline_style_judge = False
@@ -442,14 +352,20 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
         tasks = [asyncio.create_task(run_one_async(p), name=p) for p in persona_files]
         for coro in asyncio.as_completed(tasks):
-            p, out_path = await coro
-            if not use_progress:
-                print(f"Wrote: {out_path}")
-            manual_count += 1
-            if pbar is not None:
-                pbar.update(1)
-            elif use_progress:
-                print(f"Refining: {manual_count}/{total}", end="\r", flush=True)
+            try:
+                p, out_path = await coro
+                if not use_progress:
+                    print(f"Wrote: {out_path}")
+            except Exception as exc:
+                task_name = coro.get_name() if hasattr(coro, "get_name") else "unknown"
+                print(f"Error generating {task_name}", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
+            finally:
+                manual_count += 1
+                if pbar is not None:
+                    pbar.update(1)
+                elif use_progress:
+                    print(f"Refining: {manual_count}/{total}", end="\r", flush=True)
 
         if pbar is not None:
             pbar.close()
@@ -457,6 +373,22 @@ def run_from_config(cfg: dict[str, Any]) -> None:
             print()
 
     asyncio.run(_runner())
+
+
+def _iter_progress(items: List[str], total: int, enabled: bool):
+    if not enabled:
+        for x in items:
+            yield x
+        return
+    if tqdm is not None:
+        yield from tqdm(items, total=total, desc="Refining", unit="conv")
+    else:
+        count = 0
+        for x in items:
+            count += 1
+            print(f"Refining: {count}/{total}", end="\r", flush=True)
+            yield x
+        print()
 
 
 def main() -> int:
